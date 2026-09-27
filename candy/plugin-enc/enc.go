@@ -22,6 +22,7 @@ package enc
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -35,20 +36,23 @@ import (
 	"github.com/opencharly/spec/spec"
 )
 
+//go:embed schema/*.cue
+var schemaFS embed.FS
+
 const calver = "2026.182.0001"
 
 // NewProvider builds the enc provider.
 func NewProvider() pb.ProviderServer { return &provider{} }
 
-// NewMeta advertises verb:enc + the plugin's self-contained CUE schema (via
-// sdk.NewMeta → BuildCapabilities). The verb is invoked with the structured
-// spec.EncExecInput over OpExecute, not an authored plugin_input, so it declares no
-// #*Input — only the trivial #EncInput ships so the host's plugin-schema gate has a
-// non-empty, base-spliceable schema.
+// NewMeta advertises verb:enc via sdk.NewMeta → BuildCapabilities, together with the
+// plugin's OWN self-contained CUE schema (schema/enc.cue) served over Describe — there
+// is NO schema-less plugin. The verb is invoked with the structured spec.EncExecInput
+// over OpExecute, not an authored plugin_input, so the schema DOCUMENTS the enc
+// contract (no #*Input def).
 func NewMeta() pb.PluginMetaServer {
 	return sdk.NewMeta(calver,
 		[]sdk.ProvidedCapability{{Class: "verb", Word: "enc"}},
-		nil)
+		schemaFS)
 }
 
 type provider struct {
