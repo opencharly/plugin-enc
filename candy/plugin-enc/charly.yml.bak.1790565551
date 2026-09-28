@@ -1,5 +1,7 @@
+version: 2026.232.0520
 plugin-enc:
     candy:
+        version: 2026.182.0001
         description: |-
             ENCRYPTED-VOLUME (gocryptfs) MECHANICS plugin (C16a) — runs the gocryptfs /
             systemd-run --scope / fusermount3 shell mechanics that mount, unmount,
