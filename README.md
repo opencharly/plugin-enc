@@ -55,8 +55,7 @@ plugin candy in a project that uses encrypted volumes:
 ## Related
 
 - Owning skill: `/charly-automation:enc` — encrypted-volume (gocryptfs)
-  semantics and the `charly config` surface. This candy carries no `skill:`
-  entity of its own; the gap is tracked in
-  [opencharly/opencharly#291](https://github.com/opencharly/opencharly/issues/291).
+  semantics and the `charly config` surface, projected from this candy's own
+  `skill:` entity; the body is `.agents/skills/enc/SKILL.md`.
 - `/charly-internals:plugin` — the plugin/provider model.
 - [`opencharly/charly`](https://github.com/opencharly/charly) — the charly CLI.
