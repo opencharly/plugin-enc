@@ -365,9 +365,6 @@ subuid read a file through the mount. Directory modes are no alternative (making
 option (`-o allow_root` is rejected as an unknown flag; there is no `force_owner`). The only shape
 that does not expose the mount is the owner one: container root under `userns=host`.
 
-`charly config status` reports each volume's `INITIALIZED`/`MOUNTED` state, and the plaintext
-mount stays browsable on the host even when the container is stopped (the scope unit outlives the
-container).
 
 ### Host prerequisite: `user_allow_other` in `/etc/fuse.conf`
 
