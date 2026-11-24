@@ -338,29 +338,32 @@ Scope unit naming: `charly-enc-<image>-<volume>.scope` (e.g., `charly-enc-immich
 
 List active scopes: `systemctl --user list-units 'charly-enc-*'`
 
-### Why `-allow_other` is Required
+### Why `-allow_other` is Required — and where it is not
 
-An encrypted volume is a **host-owned** path: gocryptfs mounts the plaintext as a FUSE filesystem
-owned by the account that mounted it (mode 0700, `default_permissions`). Reaching it from inside
-the container therefore depends on the pod's user-namespace shape, and there are exactly two:
+An encrypted volume is a host-owned FUSE mount, so container access depends on whether the
+accessing uid is the mount owner. Measured on a scratch gocryptfs v2 vault (podman 6.2.0, crun
+1.31, rootless, `/etc/subuid` `atrawog:100000:65536`; a fresh vault mounts root `0755` with files
+`0644`):
 
-- **No CDI device** → `--userns=keep-id`, which maps the invoking user in so `crun` reaches the
-  mount. There `crun` runs as inner uid 0, which maps through the namespace chain to a
-  **subordinate** host uid, not the FUSE mount owner — FUSE's kernel check rejects it. The
-  `-allow_other` flag bypasses that check, letting crun bind-mount from the FUSE filesystem.
-  gocryptfs auto-enables `default_permissions` with `-allow_other`, so kernel UNIX permission
-  checks still apply (0700 dirs restrict access to the mount owner). Confirmed by podman issues
-  #14488, #15314, #16350, #25894.
-- **A CDI GPU device + a host-owned volume** → `--userns=host` with the workload as **container
-  root**. Under rootless podman container root *is* the invoking host user (measured: a file it
-  creates lands host-owned, uid 1000), while every other uid — including the image's own user —
-  maps into the subordinate range and **cannot write** the 0700 plaintext dir (measured:
-  `--user 1000` writes as host uid 100999 and a user-owned dir is read-only to it), and keep-id
-  cannot apply the device's file mounts at all (`crun mount_setattr … EPERM`, exit 126). So the
-  workload runs as container root, whose `HOME` is `/root` — which is why the quadlet generator
-  pins `HOME` to the image home (`ai.opencharly.home`) in exactly that branch: every path the
-  workload derives from `HOME` (and every XDG base directory, which the spec derives from
-  `HOME`) then resolves under the image user's home instead of `/root`.
+| shape | without `-allow_other` | with `-allow_other` |
+|---|---|---|
+| `userns=host`, container root (host uid 1000 = the owner) | list and read OK | OK |
+| `userns=host --user 1000` (host subuid 100999) | denied | OK |
+| `keep-id`, workload uid 1000 | **container does not start** (`crun: cannot stat …: Permission denied`) | OK |
+| `keep-id`, workload uid 0 | **container does not start** | OK |
+
+So `-allow_other` is REQUIRED by every shape whose accessing uid is not the mount owner — the
+`keep-id` shapes and any `--user` other than the owner — and is NOT required by a CDI GPU deploy
+carrying a host-owned volume, where the workload runs as container root, which under rootless
+podman IS the invoking host user and therefore the owner.
+
+**What `-allow_other` costs.** gocryptfs presents the plaintext's own modes, and `-allow_other`
+turns on `default_permissions`, which then enforces exactly those modes. A fresh vault is
+`0755`/`0644`, so while mounted ANY local uid can list and read the plaintext — measured: a host
+subuid read a file through the mount. Directory modes are no alternative (making the plain dir
+`0755` does not help a non-owner without `-allow_other`), and gocryptfs 2.7 offers no narrowing
+option (`-o allow_root` is rejected as an unknown flag; there is no `force_owner`). The only shape
+that does not expose the mount is the owner one: container root under `userns=host`.
 
 `charly config status` reports each volume's `INITIALIZED`/`MOUNTED` state, and the plaintext
 mount stays browsable on the host even when the container is stopped (the scope unit outlives the
