@@ -340,7 +340,31 @@ List active scopes: `systemctl --user list-units 'charly-enc-*'`
 
 ### Why `-allow_other` is Required
 
-Rootless podman with `--userns=keep-id` creates a two-level user namespace. During container mount setup, crun runs as inner uid 0, which maps through the namespace chain to **host uid 524288** (a subordinate uid), not the FUSE mount owner (uid 1000). FUSE's kernel check rejects access. The `-allow_other` flag bypasses this check, allowing crun to bind-mount from the FUSE filesystem. gocryptfs auto-enables `default_permissions` with `-allow_other`, so kernel UNIX permission checks still apply (0700 dirs restrict access to the mount owner). Confirmed by podman issues #14488, #15314, #16350, #25894.
+An encrypted volume is a **host-owned** path: gocryptfs mounts the plaintext as a FUSE filesystem
+owned by the account that mounted it (mode 0700, `default_permissions`). Reaching it from inside
+the container therefore depends on the pod's user-namespace shape, and there are exactly two:
+
+- **No CDI device** → `--userns=keep-id`, which maps the invoking user in so `crun` reaches the
+  mount. There `crun` runs as inner uid 0, which maps through the namespace chain to a
+  **subordinate** host uid, not the FUSE mount owner — FUSE's kernel check rejects it. The
+  `-allow_other` flag bypasses that check, letting crun bind-mount from the FUSE filesystem.
+  gocryptfs auto-enables `default_permissions` with `-allow_other`, so kernel UNIX permission
+  checks still apply (0700 dirs restrict access to the mount owner). Confirmed by podman issues
+  #14488, #15314, #16350, #25894.
+- **A CDI GPU device + a host-owned volume** → `--userns=host` with the workload as **container
+  root**. Under rootless podman container root *is* the invoking host user (measured: a file it
+  creates lands host-owned, uid 1000), while every other uid — including the image's own user —
+  maps into the subordinate range and **cannot write** the 0700 plaintext dir (measured:
+  `--user 1000` writes as host uid 100999 and a user-owned dir is read-only to it), and keep-id
+  cannot apply the device's file mounts at all (`crun mount_setattr … EPERM`, exit 126). So the
+  workload runs as container root, whose `HOME` is `/root` — which is why the quadlet generator
+  pins `HOME` to the image home (`ai.opencharly.home`) in exactly that branch: every path the
+  workload derives from `HOME` (and every XDG base directory, which the spec derives from
+  `HOME`) then resolves under the image user's home instead of `/root`.
+
+`charly config status` reports each volume's `INITIALIZED`/`MOUNTED` state, and the plaintext
+mount stays browsable on the host even when the container is stopped (the scope unit outlives the
+container).
 
 ### Host prerequisite: `user_allow_other` in `/etc/fuse.conf`
 
@@ -535,7 +559,7 @@ Plain bind mounts do not use encrypted storage commands. They are direct host di
 - `sdk/deploykit/enc_probe.go` — the enc PROBE + PLAN surface, kit-resident so both the CLI leaves and a plugin caller share one implementation. `EncPlanFor`/`EncPlanForConfig` build the per-volume plan (resolved cipher/plain dirs + init/mounted flags + scope-unit name); `LoadEncryptedVolume` loads the encrypted-volume set from the per-host config; `EncStatus` is a pure probe+print; the path/probe helpers `ResolveEncVolumeDir`/`IsEncryptedMounted`/`IsEncryptedInitialized`/`CipherPopulatedPlainEmpty` back `VerifyBindMounts`; `FuseAllowOtherEnabled` is the `/etc/fuse.conf` preflight; `AskPassword` is the `systemd-ask-password` prompt
 - `sdk/deploykit/enc_passphrase.go` — the passphrase-resolution ORCHESTRATION, taking its credential store as an injected `CredentialAccess` rather than by name. `ResolveEncPassphrase` (env var → store → auto-generate or prompt), `ResolveEncPassphraseForMount` + its testable `…WithResolver` core (the `usesWaitingBackend` split), `EncNotStoredError`, `RetryUnavailable` (the bounded `source=unavailable` poll) and its two knobs `EncMountDeadline` / `EncMountPollPeriod`
 - `candy/plugin-pod/enc_cmd.go` — the enc SHIM + deploy-model (C16a, relocated from the DELETED `charly/enc.go`, K-wave 2). `pluginEncMount`/`pluginEncUnmount`/`encPasswd`/`ensureEncryptedMounts` are thin shims that HOST-PRELIFT the per-volume plan (`encPlanFor`: resolved cipher/plain dirs + init/mounted flags + scope-unit name) and the passphrase, then `encExecViaPlugin` resolves verb:enc and Invokes OpExecute. Keeps (deploy-model): `encMount`'s all-mounted short-circuit, `encStatus` (pure probe+print), the path/probe helpers (`encryptedPlainDir`/`isEncryptedMounted`/`isEncryptedInitialized`/`cipherPopulatedPlainEmpty` — the mandatorily-core `ResolveVolumeBacking` + `verifyBindMounts` consume them), `loadEncryptedVolume` (loader), `resolveEncPassphraseForMount` (bounded retry for `source=unavailable` via `retryUnavailable`), `awaitKeyringUnlockViaPlugin` (the `source=locked` waiter — delegates the event-driven DBus wait to `verb:credential await-unlock`, out-of-process in candy/plugin-secrets, so charly's core links no godbus)
-- `candy/plugin-enc/enc.go` — the ENCRYPTED-VOLUME (gocryptfs) MECHANICS plugin (C16a, verb:enc, compiled-in): the gocryptfs / `systemd-run --scope --unit=charly-enc-<dir>-<volume>` / fusermount3 / `gocryptfs -init` / `gocryptfs -passwd` / extpass SHELLING (`mountVolumes`/`unmountVolumes`/`ensureVolumes`/`passwdVolumes`/`runGocryptfsScope`/`encExtpassArgs`), driven by the host-prelifted `spec.EncExecInput`. `-allow_other` for rootless keep-id + the stale-scope retry live here. Wire types: CUE-sourced at `spec/schema/enc.cue`, generated into `spec/spec/cue_types_gen.go` (`#EncExecInput`/`#EncVolumePlan`/`#EncExecReply`, shared by the shim + the plugin); the plain `EncMethod*` string-selector constants stay hand-written in `spec/spec/enc_consts.go` (never a JSON/YAML shape for `gengotypes` to generate)
+- `candy/plugin-enc/enc.go` — the ENCRYPTED-VOLUME (gocryptfs) MECHANICS plugin (C16a, verb:enc, compiled-in): the gocryptfs / `systemd-run --scope --unit=charly-enc-<dir>-<volume>` / fusermount3 / `gocryptfs -init` / `gocryptfs -passwd` / extpass SHELLING (`mountVolumes`/`unmountVolumes`/`ensureVolumes`/`passwdVolumes`/`runGocryptfsScope`/`encExtpassArgs`), driven by the host-prelifted `spec.EncExecInput`. `-allow_other` for the container user-namespace shapes + the stale-scope retry live here. Wire types: CUE-sourced at `spec/schema/enc.cue`, generated into `spec/spec/cue_types_gen.go` (`#EncExecInput`/`#EncVolumePlan`/`#EncExecReply`, shared by the shim + the plugin); the plain `EncMethod*` string-selector constants stay hand-written in `spec/spec/enc_consts.go` (never a JSON/YAML shape for `gengotypes` to generate)
 - `candy/plugin-secrets/keyring_unlock_wait.go` — `awaitUnlock` (the externalized event-driven DBus signal wait for `source=locked`), `awaitUnlockLoop`, `awaitUnlockBackstopOnly`, `isCollectionUnlockedSignal` (the collection-unlocked signal filter), `awaitSignalBackstop` (30s), `awaitProgressLogInterval` (1h)
 - `charly/credential_plugin.go` — the CORE adapter (THINned 213→109, K-wave 2 cone CONTESTED): `DefaultCredentialStore` (→ the `credentialResolver` interface), `ResolveCredential` (the `"unavailable"`-vs-`"default"` source distinction), `pluginCredentialStore.call`/`callCtx`/`resolve` (the VNC-password resolve path). The former `pluginCredentialStore.awaitUnlock` + `credentialAwaiter` interface + `resolveSecretBackend`/`resetDefaultCredentialStore`/`CredentialStore` interface are DELETED (zero production callers — the keyring-unlock wait lives plugin-side in candy/plugin-pod's `pluginAwaitKeyringUnlock`, driven via `deploykit.ResolveEncPassphraseForMount`).
 - `candy/plugin-secrets/secret_service.go` — godbus-based ssClient, `findItemAcrossCollections` (with locked-vs-broken tracking), `ssOps` interface for test injection, `ErrSSNotFound` / `ErrSSAllBroken` / `ErrSSInteractiveUnlockRequired` sentinel errors
